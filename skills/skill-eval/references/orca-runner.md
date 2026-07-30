@@ -252,5 +252,29 @@ Verified against Orca 1.4.162 and Droid 0.180.0:
 - **`terminal wait --for tui-idle` works correctly for Droid.** Confirmed satisfied on a fresh session.
 - **`orchestration` lifecycle is optional here.** `worker_done` reporting, dispatch preambles, and `check --wait` are for workers that report back through Orca's inbox. This eval loop reads terminal output and files on disk directly, so plain `terminal create` / `send` / `read` / `wait` is enough. If you do want task provenance, create a Run and Task and dispatch to the handle with `dispatch --to <handle>` — but note `--inject` targets recognized agent CLIs, and Droid isn't in that list, so send the prompt with `terminal send` instead.
 - **`worker-read --source auto` won't give a hook transcript for Droid.** It promises exact transcripts for Codex, Claude, OpenClaude, and Grok; anything else falls back to terminal output. Just use `terminal read`.
-- **Interactive `droid` has no `--model` flag.** The subject inherits the user's configured default model. If that model is rate-limited, the subject stalls immediately with a usage-limit message — which looks nothing like a skill failure once you've seen it, but will waste a run if you don't check. `droid exec` does support `-m/--model`, and interactive `droid` supports `--settings <path>`, if you need to pin a model.
+- **Interactive `droid` has no `--model` flag.** The subject inherits the user's configured default model. If that model is rate-limited, the subject stalls immediately with a usage-limit message — which looks nothing like a skill failure once you've seen it, but will waste a run if you don't check.
+
+  To pin a different model, build an overlay settings file and pass `--settings`, which merges for that process only and leaves the user's global config alone:
+
+  ```bash
+  python3 -c "
+  import json, os
+  src = json.load(open(os.path.expanduser('~/.factory/settings.json')))
+  overlay = {
+      'customModels': src['customModels'],
+      'sessionDefaultSettings': {**src['sessionDefaultSettings'], 'model': '<model-id>'},
+      'trustedFolders': src.get('trustedFolders', []),
+  }
+  json.dump(overlay, open('<workspace>/eval-settings.json', 'w'), indent=2)
+  "
+
+  ORCA terminal create --worktree path:<repo> --title "..." \
+    --command "droid --settings <workspace>/eval-settings.json" --json
+  ```
+
+  Model ids come from the `id` field of `customModels` in settings (e.g. `custom:droidproxy:sonnet-5`), not the display name. Carry `customModels` and `trustedFolders` into the overlay — dropping `trustedFolders` makes the subject prompt for folder trust and stall before it reads anything.
+
+  Whatever you pick, use the same model for every arm and every iteration. Switching models mid-benchmark makes the comparison meaningless.
+
+- **`--worktree active` only resolves from inside an Orca-managed worktree.** Running it from an arbitrary directory fails with `selector_not_found`. Use `--worktree path:<repo-root>` and give the subject absolute output paths, rather than relying on the tab's working directory.
 - **`terminal stop` takes `--worktree`, not `--terminal`.** It stops every terminal in a worktree. To close one tab, use `terminal close --terminal <handle> --tab`.

@@ -86,7 +86,7 @@ This section is one continuous sequence — don't stop partway through. Do NOT u
 
 Read `references/orca-runner.md` for the verified command recipes — spawning, prompting, polling, intervening, and cleanup. The rest of this section is the decision-making around those commands.
 
-Put results in `<skill-name>-workspace/` as a sibling to the skill directory, in exactly this layout:
+Put results in `<skill-name>-workspace/`, **outside any skills directory**, in exactly this layout:
 
 ```
 <skill-name>-workspace/iteration-1/
@@ -103,6 +103,8 @@ Two naming rules are load-bearing, and getting either wrong fails silently rathe
 
 Configuration names are discovered dynamically, so `with_skill`, `baseline`, and `old_skill` all work. Outputs go in `run-1/outputs/`; `grading.json` and `timing.json` sit beside it in `run-1/`. Don't create all of this upfront — make directories as you go.
 
+**Keep the workspace out of `~/.agents/skills/` and `~/.factory/skills/`.** Anything containing a `SKILL.md` under those roots gets picked up by skill discovery, so a snapshot of the skill under test registers as a second copy of the same name. The subject then reports a duplicate-name diagnostic, and the copy that wins is decided for you. If the skill lives at `~/.agents/skills/foo/`, put the workspace at `~/.agents/foo-workspace/` — one level up, not beside the skill.
+
 ### Step 1: Decide the baseline with the user
 
 Ask before spawning anything, because it changes both the run count and what the numbers mean:
@@ -110,7 +112,7 @@ Ask before spawning anything, because it changes both the run count and what the
 - **Subject only.** One Droid per test case, using the skill. Fastest, and you get to watch each run properly. Good when the user wants to see how the skill behaves, or is iterating quickly on obvious problems. No pass-rate comparison — the grades are absolute, not relative.
 - **With a baseline.** Two Droids per test case. Pick the baseline that answers the user's actual question:
   - *"Does this skill earn its place?"* → no skill at all. Same prompt, no skill reference, outputs to `baseline/run-1/outputs/`.
-  - *"Is my revision better than what I had?"* → the previous version. Snapshot the skill before editing (`cp -r <skill-path> <workspace>/skill-snapshot/`), point the baseline subject at the snapshot, outputs to `old_skill/run-1/outputs/`.
+  - *"Is my revision better than what I had?"* → the previous version. Snapshot the skill before editing (`cp -r <skill-path> <workspace>/skill-snapshot/`) — with the workspace outside any skills root, per the note above, or the snapshot collides with the live skill's name — then point the baseline subject at the snapshot, outputs to `old_skill/run-1/outputs/`.
 
 Early on, the no-skill baseline is the most revealing thing you can run — if the skill isn't beating no-skill, no amount of wordsmithing will save it. Suggest it when the user hasn't formed a view yet.
 
