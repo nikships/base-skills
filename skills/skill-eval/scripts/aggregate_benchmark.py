@@ -123,14 +123,39 @@ def load_run_results(benchmark_dir: Path) -> dict:
                     print(f"Warning: Invalid JSON in {grading_file}: {e}")
                     continue
 
-                # Extract metrics
+                # Extract metrics. A grading.json with expectations but no summary
+                # would otherwise score 0% silently, which reads as a failed run
+                # rather than a malformed file.
+                summary = grading.get("summary")
+                if summary is None:
+                    expectations = grading.get("expectations", [])
+                    if expectations:
+                        passed = sum(1 for e in expectations if e.get("passed"))
+                        total = len(expectations)
+                        summary = {
+                            "passed": passed,
+                            "failed": total - passed,
+                            "total": total,
+                            "pass_rate": passed / total,
+                        }
+                        print(
+                            f"Warning: {grading_file} has no 'summary' block; "
+                            f"derived {passed}/{total} from expectations."
+                        )
+                    else:
+                        print(
+                            f"Warning: {grading_file} has neither 'summary' nor "
+                            f"'expectations'; counting this run as 0%."
+                        )
+                        summary = {}
+
                 result = {
                     "eval_id": eval_id,
                     "run_number": run_number,
-                    "pass_rate": grading.get("summary", {}).get("pass_rate", 0.0),
-                    "passed": grading.get("summary", {}).get("passed", 0),
-                    "failed": grading.get("summary", {}).get("failed", 0),
-                    "total": grading.get("summary", {}).get("total", 0),
+                    "pass_rate": summary.get("pass_rate", 0.0),
+                    "passed": summary.get("passed", 0),
+                    "failed": summary.get("failed", 0),
+                    "total": summary.get("total", 0),
                 }
 
                 # Extract timing — check grading.json first, then sibling timing.json
@@ -180,7 +205,20 @@ def aggregate_results(results: dict) -> dict:
     Returns run_summary with stats for each configuration and delta.
     """
     run_summary = {}
-    configs = list(results.keys())
+
+    # The delta is primary-minus-baseline, so which config lands first decides
+    # its sign. Discovery order is filesystem order, which would silently report
+    # a skill that beat its baseline as having lost to it. Order explicitly:
+    # with_skill first, then any other non-baseline config, baselines last.
+    def config_rank(name: str) -> tuple:
+        lowered = name.lower()
+        if lowered.startswith("with_skill"):
+            return (0, name)
+        if lowered.startswith(("baseline", "no_skill", "without_skill", "old_skill")):
+            return (2, name)
+        return (1, name)
+
+    configs = sorted(results.keys(), key=config_rank)
 
     for config in configs:
         runs = results.get(config, [])
@@ -203,23 +241,23 @@ def aggregate_results(results: dict) -> dict:
             "tokens": calculate_stats(tokens)
         }
 
-    # Calculate delta between the first two configs (if two exist)
+    # Delta only means something with two configurations to compare. A
+    # subject-only run has nothing to subtract, and treating the missing arm as
+    # zero invents a baseline that scored 0% — which reads as "the skill beat
+    # no-skill by a mile" when no baseline was ever run.
     if len(configs) >= 2:
         primary = run_summary.get(configs[0], {})
         baseline = run_summary.get(configs[1], {})
-    else:
-        primary = run_summary.get(configs[0], {}) if configs else {}
-        baseline = {}
 
-    delta_pass_rate = primary.get("pass_rate", {}).get("mean", 0) - baseline.get("pass_rate", {}).get("mean", 0)
-    delta_time = primary.get("time_seconds", {}).get("mean", 0) - baseline.get("time_seconds", {}).get("mean", 0)
-    delta_tokens = primary.get("tokens", {}).get("mean", 0) - baseline.get("tokens", {}).get("mean", 0)
+        delta_pass_rate = primary.get("pass_rate", {}).get("mean", 0) - baseline.get("pass_rate", {}).get("mean", 0)
+        delta_time = primary.get("time_seconds", {}).get("mean", 0) - baseline.get("time_seconds", {}).get("mean", 0)
+        delta_tokens = primary.get("tokens", {}).get("mean", 0) - baseline.get("tokens", {}).get("mean", 0)
 
-    run_summary["delta"] = {
-        "pass_rate": f"{delta_pass_rate:+.2f}",
-        "time_seconds": f"{delta_time:+.1f}",
-        "tokens": f"{delta_tokens:+.0f}"
-    }
+        run_summary["delta"] = {
+            "pass_rate": f"{delta_pass_rate:+.2f}",
+            "time_seconds": f"{delta_time:+.1f}",
+            "tokens": f"{delta_tokens:+.0f}"
+        }
 
     return run_summary
 
@@ -286,9 +324,16 @@ def generate_markdown(benchmark: dict) -> str:
     # Determine config names (excluding "delta")
     configs = [k for k in run_summary if k != "delta"]
     config_a = configs[0] if len(configs) >= 1 else "config_a"
-    config_b = configs[1] if len(configs) >= 2 else "config_b"
     label_a = config_a.replace("_", " ").title()
-    label_b = config_b.replace("_", " ").title()
+    a_summary = run_summary.get(config_a, {})
+    delta = run_summary.get("delta", {})
+
+    # With a single configuration there is no comparison column to render.
+    compared = len(configs) >= 2
+    if compared:
+        config_b = configs[1]
+        label_b = config_b.replace("_", " ").title()
+        b_summary = run_summary.get(config_b, {})
 
     lines = [
         f"# Skill Benchmark: {metadata['skill_name']}",
@@ -299,28 +344,33 @@ def generate_markdown(benchmark: dict) -> str:
         "",
         "## Summary",
         "",
-        f"| Metric | {label_a} | {label_b} | Delta |",
-        "|--------|------------|---------------|-------|",
     ]
 
-    a_summary = run_summary.get(config_a, {})
-    b_summary = run_summary.get(config_b, {})
-    delta = run_summary.get("delta", {})
+    if compared:
+        lines.extend([
+            f"| Metric | {label_a} | {label_b} | Delta |",
+            "|--------|------------|---------------|-------|",
+        ])
+    else:
+        lines.extend([
+            f"_Single configuration — no baseline was run, so these figures are absolute, not a comparison._",
+            "",
+            f"| Metric | {label_a} |",
+            "|--------|------------|",
+        ])
 
-    # Format pass rate
-    a_pr = a_summary.get("pass_rate", {})
-    b_pr = b_summary.get("pass_rate", {})
-    lines.append(f"| Pass Rate | {a_pr.get('mean', 0)*100:.0f}% ± {a_pr.get('stddev', 0)*100:.0f}% | {b_pr.get('mean', 0)*100:.0f}% ± {b_pr.get('stddev', 0)*100:.0f}% | {delta.get('pass_rate', '—')} |")
+    def row(label: str, key: str, fmt, delta_key: str = "", suffix: str = ""):
+        a = a_summary.get(key, {})
+        cell_a = f"{fmt(a.get('mean', 0))} ± {fmt(a.get('stddev', 0))}"
+        if not compared:
+            return f"| {label} | {cell_a} |"
+        b = b_summary.get(key, {})
+        cell_b = f"{fmt(b.get('mean', 0))} ± {fmt(b.get('stddev', 0))}"
+        return f"| {label} | {cell_a} | {cell_b} | {delta.get(delta_key, '—')}{suffix} |"
 
-    # Format time
-    a_time = a_summary.get("time_seconds", {})
-    b_time = b_summary.get("time_seconds", {})
-    lines.append(f"| Time | {a_time.get('mean', 0):.1f}s ± {a_time.get('stddev', 0):.1f}s | {b_time.get('mean', 0):.1f}s ± {b_time.get('stddev', 0):.1f}s | {delta.get('time_seconds', '—')}s |")
-
-    # Format tokens
-    a_tokens = a_summary.get("tokens", {})
-    b_tokens = b_summary.get("tokens", {})
-    lines.append(f"| Tokens | {a_tokens.get('mean', 0):.0f} ± {a_tokens.get('stddev', 0):.0f} | {b_tokens.get('mean', 0):.0f} ± {b_tokens.get('stddev', 0):.0f} | {delta.get('tokens', '—')} |")
+    lines.append(row("Pass Rate", "pass_rate", lambda v: f"{v*100:.0f}%", "pass_rate"))
+    lines.append(row("Time", "time_seconds", lambda v: f"{v:.1f}s", "time_seconds", "s"))
+    lines.append(row("Tokens", "tokens", lambda v: f"{v:.0f}", "tokens"))
 
     # Notes section
     if benchmark.get("notes"):
@@ -394,7 +444,10 @@ def main():
         pr = run_summary[config]["pass_rate"]["mean"]
         label = config.replace("_", " ").title()
         print(f"  {label}: {pr*100:.1f}% pass rate")
-    print(f"  Delta:         {delta.get('pass_rate', '—')}")
+    if "delta" in run_summary:
+        print(f"  Delta:         {delta.get('pass_rate', '—')}")
+    else:
+        print("  Delta:         n/a (single configuration, no baseline)")
 
 
 if __name__ == "__main__":
